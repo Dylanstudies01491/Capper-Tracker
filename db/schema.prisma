@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["fullTextSearch"]
+}
+
+datasource db {
+  provider = env("DATABASE_PROVIDER")
+  url      = env("DATABASE_URL")
+}
+
+enum PickType {
+  spread
+  moneyline
+  total
+}
+
+enum PickResult {
+  pending
+  win
+  loss
+  push
+}
+
+enum PickSource {
+  manual
+  api
+  webhook
+}
+
+model Owner {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  role          String   @default("owner")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Capper {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  displayName  String
+  bio          String?
+  avatarUrl    String?
+  joinDate     DateTime @default(now())
+  active       Boolean  @default(true)
+  picks        Pick[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Pick {
+  id                   String     @id @default(uuid())
+  capperId             String
+  capper               Capper     @relation(fields: [capperId], references: [id], onDelete: Cascade)
+  eventDate            DateTime
+  sport                String
+  homeTeam             String
+  awayTeam             String
+  pickType             PickType
+  pickSide             String
+  pickPrice            Int
+  listedSpreadOrTotal  Decimal?
+  stake                Decimal?
+  postedAt             DateTime
+  result               PickResult @default(pending)
+  profit               Decimal?   @default(0)
+  gradedAt             DateTime?
+  source               PickSource @default(manual)
+  notes                String?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+}
+
+model PickGradeLog {
+  id         String   @id @default(uuid())
+  pickId     String
+  pick       Pick     @relation(fields: [pickId], references: [id], onDelete: Cascade)
+  payload    Json
+  createdAt  DateTime @default(now())
+}

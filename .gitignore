@@ -1,0 +1,12 @@
+node_modules
+.dist
+.turbo
+.next
+.env
+.env.local
+coverage
+.DS_Store
+.prisma
+pnpm-lock.yaml
+yarn.lock
+*.log

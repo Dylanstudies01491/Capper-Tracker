@@ -1,0 +1,26 @@
+{
+  "name": "capper-tracker",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write .",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.19",
+    "husky": "8.0.3",
+    "lint-staged": "15.2.0",
+    "prettier": "3.2.5",
+    "turbo": "1.12.3",
+    "ts-node": "10.9.2",
+    "typescript": "5.3.3"
+  }
+}
