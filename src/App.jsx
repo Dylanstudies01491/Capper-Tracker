@@ -1,49 +1,117 @@
-
 import React, { useEffect, useState, useMemo } from 'react'
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts'
+import { createClient } from '@supabase/supabase-js'
 
 /*
-  Cappereal Admin — cappereal.com
-  Single-file React app. Tailwind CSS assumed. Uses recharts for charts.
-  Local-only version (Option 1). Admin mode unlocked with a password (local to browser).
+  Cappereal Admin — Shared via Supabase
+  - Reads/writes a single shared JSON row in table app_state (id='singleton')
+  - Caches to localStorage for fast loads/offline, but Supabase is the source of truth
+  - Admin unlock remains local to each browser
 */
 
-// Change this default admin password here if you wish (only stored in code/browser).
-// For stronger security you'd use a backend; this is local-only convenience.
-const DEFAULT_ADMIN_PASSWORD = 'admin123' 
+// ====== CONFIG ======
+const DEFAULT_ADMIN_PASSWORD = 'admin123'
+const STORAGE_KEY = 'cappereal_data_v1'            // local cache only
+const ADMIN_KEY = 'cappereal_admin_unlocked_v1'    // local admin flag
+
+// Init Supabase (if env vars are present)
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabase = (SUPABASE_URL && SUPABASE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null
 
 export default function App() {
-  const STORAGE_KEY = 'cappereal_data_v1'
-  const ADMIN_KEY = 'cappereal_admin_unlocked_v1'
-
+  // ---- App state ----
   const [data, setData] = useState(() => {
+    // load cached copy immediately so UI renders fast
     try {
       const raw = localStorage.getItem(STORAGE_KEY)
       if (raw) return JSON.parse(raw)
-    } catch (e) { /* ignore */ }
-    // start empty — no demo data
+    } catch {}
     return { cappers: [], bets: [] }
   })
+  const [loading, setLoading] = useState(!!supabase) // if supabase exists, we will fetch before declaring done
+  const [status, setStatus] = useState(supabase ? 'Connecting to shared DB…' : 'Supabase not configured, using local cache')
+  const [error, setError] = useState(null)
 
-  const [isAdmin, setIsAdmin] = useState(()=> {
-    try {
-      return localStorage.getItem(ADMIN_KEY) === 'true'
-    } catch(e) { return false }
+  const [isAdmin, setIsAdmin] = useState(() => {
+    try { return localStorage.getItem(ADMIN_KEY) === 'true' } catch { return false }
   })
+  useEffect(() => { localStorage.setItem(ADMIN_KEY, isAdmin ? 'true' : 'false') }, [isAdmin])
 
+  // ---- Load from Supabase on mount (if configured) ----
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-  }, [data])
+    if (!supabase) { setLoading(false); return }
+    let cancelled = false
 
+    ;(async () => {
+      try {
+        setStatus('Loading shared data…')
+        const { data: row, error } = await supabase
+          .from('app_state')
+          .select('payload')
+          .eq('id', 'singleton')
+          .single()
+
+        if (error) throw error
+
+        const payload = row?.payload || { cappers: [], bets: [] }
+        if (!cancelled) {
+          setData(payload)
+          // refresh local cache
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)) } catch {}
+          setStatus('Connected ✓')
+        }
+      } catch (e) {
+        console.error('Supabase load error', e)
+        if (!cancelled) {
+          setError('Could not load from Supabase. Using local cache.')
+          setStatus('Offline / local cache')
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [])
+
+  // ---- Save to Supabase whenever data changes (and after initial load) ----
   useEffect(() => {
-    localStorage.setItem(ADMIN_KEY, isAdmin ? 'true' : 'false')
-  }, [isAdmin])
+    // Always keep a local cache (handy offline)
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)) } catch {}
 
+    if (!supabase) return
+    if (loading) return
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        setStatus('Saving…')
+        const { error } = await supabase
+          .from('app_state')
+          .upsert({ id: 'singleton', payload: data }, { onConflict: ['id'] })
+
+        if (error) throw error
+        if (!cancelled) setStatus('Saved ✓')
+      } catch (e) {
+        console.error('Supabase save error', e)
+        if (!cancelled) {
+          setError('Could not save to Supabase (changes are cached locally).')
+          setStatus('Save failed — cached locally')
+        }
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [data, loading])
+
+  // ---------- Domain logic (unchanged) ----------
   const [selectedCapper, setSelectedCapper] = useState(null)
   const [filterRange, setFilterRange] = useState('all') // all|7|30|yesterday
   const [view, setView] = useState('dashboard')
 
-  // CRUD for Cappers (admin-only actions)
   function addCapper(name) {
     const trimmed = String(name||'').trim()
     if (!trimmed) return
@@ -60,17 +128,14 @@ export default function App() {
     if (selectedCapper === id) setSelectedCapper(null)
   }
 
-  // Add Bet (admin-only)
   function addBet({ capperId, date, sport, matchup, odds, stake, result }) {
     const profit = computeProfit(odds, stake, result)
     const id = 'b' + Date.now()
     setData(d => ({ ...d, bets: [...d.bets, { id, capperId, date, sport, matchup, odds: Number(odds), stake: Number(stake), result, profit }] }))
   }
-
   function editBet(id, updates) {
     setData(d => ({ ...d, bets: d.bets.map(b=> b.id===id ? {...b, ...updates, profit: computeProfit(updates.odds ?? b.odds, updates.stake ?? b.stake, updates.result ?? b.result)} : b) }))
   }
-
   function removeBet(id) {
     setData(d => ({ ...d, bets: d.bets.filter(b => b.id !== id) }))
   }
@@ -82,12 +147,10 @@ export default function App() {
     if (!Number.isFinite(odds) || !Number.isFinite(stake)) return 0
     if (result === 'push') return 0
     if (result === 'loss') return -toMoney(stake)
-    // win — American odds
     if (odds > 0) return toMoney(stake * (odds / 100))
     return toMoney(stake * (100 / Math.abs(odds)))
   }
 
-  // Filters
   function filterBets(bets, capperId = null, range = filterRange) {
     let filtered = bets.slice()
     if (capperId) filtered = filtered.filter(b => b.capperId === capperId)
@@ -106,7 +169,6 @@ export default function App() {
     return filtered.sort((a,b)=>new Date(b.date)-new Date(a.date))
   }
 
-  // Stats per capper
   function summarize(bets){
     const profit = bets.reduce((s,b)=>s+Number(b.profit||0),0)
     const stake = bets.reduce((s,b)=>s+Number(b.stake||0),0)
@@ -115,7 +177,6 @@ export default function App() {
     const pushes = bets.filter(b=>b.result==='push').length
     return { bets: bets.length, profit: Math.round(profit*100)/100, stake: Math.round(stake*100)/100, wins, losses, pushes }
   }
-
   function statsFor(capperId) {
     const bets = data.bets.filter(b => b.capperId === capperId)
     const allTime = summarize(bets)
@@ -125,7 +186,6 @@ export default function App() {
     return { allTime, last7, last30, yesterday }
   }
 
-  // Leaderboard sort by total profit then ROI
   const leaderboard = useMemo(() => {
     return data.cappers.map(c => {
       const s = statsFor(c.id).allTime
@@ -133,34 +193,37 @@ export default function App() {
     }).sort((a,b)=> b.totalProfit - a.totalProfit || b.roi - a.roi)
   }, [data])
 
-  // Admin unlock
   function unlockAdmin(password) {
-    if (String(password) === DEFAULT_ADMIN_PASSWORD) {
-      setIsAdmin(true)
-      return true
-    }
+    if (String(password) === DEFAULT_ADMIN_PASSWORD) { setIsAdmin(true); return true }
     return false
   }
-  function lockAdmin() {
-    setIsAdmin(false)
-  }
+  function lockAdmin() { setIsAdmin(false) }
 
+  // ---------- UI ----------
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 p-6 font-sans">
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-3xl font-extrabold tracking-tight">Cappereal Admin <span className="text-indigo-600">cappereal.com</span></h1>
-        <div className="flex flex-wrap gap-2 items-center">
-          <NavButton active={view==='dashboard'} onClick={()=>setView('dashboard')}>Dashboard</NavButton>
-          <NavButton active={view==='cappers'} onClick={()=>setView('cappers')}>Cappers</NavButton>
-          <NavButton active={view==='bets'} onClick={()=>setView('bets')}>Bets</NavButton>
-          <NavButton active={view==='leaderboard'} onClick={()=>setView('leaderboard')}>Leaderboard</NavButton>
-          <ExportJSON data={data} setData={setData} STORAGE_KEY={STORAGE_KEY} />
-          <div className="ml-2">
-            {isAdmin ? (
-              <button onClick={lockAdmin} className="px-3 py-1 bg-red-50 border text-sm rounded">Admin: ON (click to lock)</button>
-            ) : (
-              <AdminUnlock onUnlock={unlockAdmin} />
-            )}
+
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <div className="text-xs text-gray-500 sm:mr-2">
+            {loading ? status : <span>{status}</span>}
+            {error ? <span className="text-red-600 ml-2">({error})</span> : null}
+          </div>
+
+          <div className="flex flex-wrap gap-2 items-center">
+            <NavButton active={view==='dashboard'} onClick={()=>setView('dashboard')}>Dashboard</NavButton>
+            <NavButton active={view==='cappers'} onClick={()=>setView('cappers')}>Cappers</NavButton>
+            <NavButton active={view==='bets'} onClick={()=>setView('bets')}>Bets</NavButton>
+            <NavButton active={view==='leaderboard'} onClick={()=>setView('leaderboard')}>Leaderboard</NavButton>
+            <ExportJSON data={data} setData={setData} STORAGE_KEY={STORAGE_KEY} />
+            <div className="ml-2">
+              {isAdmin ? (
+                <button onClick={lockAdmin} className="px-3 py-1 bg-red-50 border text-sm rounded">Admin: ON (click to lock)</button>
+              ) : (
+                <AdminUnlock onUnlock={unlockAdmin} />
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -180,12 +243,14 @@ export default function App() {
         )}
       </main>
 
-      <footer className="mt-8 text-sm text-gray-600">Admin panel — Manual odds entry, full filters, import/export JSON. Data stored locally in your browser. Admin unlock is local to this browser only.</footer>
+      <footer className="mt-8 text-sm text-gray-600">
+        Admin panel — Shared via Supabase. Admin unlock is local to this browser. Data cached locally for speed/offline.
+      </footer>
     </div>
   )
 }
 
-/* -- UI components -- */
+/* -- UI components (unchanged) -- */
 
 function NavButton({active, children, onClick}){
   return (
@@ -370,7 +435,6 @@ function toCumulativeSeriesByDay(bets){
     cum += Number(b.profit || 0)
     map[d] = cum
   }
-  // convert to array of {date, cum} with all dates present between first and last
   const dates = Object.keys(map).sort()
   if(dates.length===0) return []
   const first = new Date(dates[0])
@@ -450,15 +514,15 @@ function BetsPanel({ data, addBet, editBet, removeBet, computeProfit, setData, s
 
         <div>
           <label className="text-sm">Odds (American)</label>
-          <input className="w-full border p-2 rounded" value={form.odds} onChange={e=>setForm({...form, odds:e.target.value})} placeholder="e.g. -120 or +150" />
+          <input className="w-full border p-2 rounded" value={form.odds} onChange={e=>setForm({...form, odds: e.target.value})} placeholder="e.g. -120 or +150" />
         </div>
         <div>
           <label className="text-sm">Stake</label>
-          <input type="number" className="w-full border p-2 rounded" value={form.stake} onChange={e=>setForm({...form, stake:e.target.value})} min="0" step="0.01" />
+          <input type="number" className="w-full border p-2 rounded" value={form.stake} onChange={e=>setForm({...form, stake: e.target.value})} min="0" step="0.01" />
         </div>
         <div>
           <label className="text-sm">Result</label>
-          <select className="w-full border p-2 rounded" value={form.result} onChange={e=>setForm({...form, result:e.target.value})}>
+          <select className="w-full border p-2 rounded" value={form.result} onChange={e=>setForm({...form, result: e.target.value})}>
             <option value="win">Win</option>
             <option value="loss">Loss</option>
             <option value="push">Push</option>
@@ -547,12 +611,11 @@ function BetsPanel({ data, addBet, editBet, removeBet, computeProfit, setData, s
     </div>
   )
 
-  // helper for opening inline edit (captures closures)
   function startEditInline(b, setEditingLocal, setEditFormLocal){
     setEditingLocal(b.id)
     setEditFormLocal({...b})
   }
-  function saveEdit(){ /* placeholder; actual save handled below via editBet */ }
+  function saveEdit(){ /* actual save handled via editBet */ }
 }
 
 function Leaderboard({ leaderboard }){
@@ -599,13 +662,18 @@ function ExportJSON({ data, setData, STORAGE_KEY }){
       try{
         const parsed = JSON.parse(reader.result)
         if(!parsed || typeof parsed!== 'object' || !('cappers' in parsed) || !('bets' in parsed)) throw new Error('bad shape')
-        setData(parsed)
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+        setData(parsed) // triggers Supabase save effect
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)) } catch {}
       }catch(err){ alert('Invalid JSON') }
     }
     reader.readAsText(file)
   }
-  function clearAll(){ if(window.confirm('Clear all local data?')){ localStorage.removeItem(STORAGE_KEY); location.reload() } }
+  function clearAll(){
+    if(window.confirm('Clear all data (shared + local)?')){
+      setData({ cappers: [], bets: [] }) // will upsert empty payload to Supabase
+      try { localStorage.removeItem(STORAGE_KEY) } catch {}
+    }
+  }
 
   return (
     <div className="inline-flex items-center gap-2">
@@ -618,3 +686,4 @@ function ExportJSON({ data, setData, STORAGE_KEY }){
     </div>
   )
 }
+
